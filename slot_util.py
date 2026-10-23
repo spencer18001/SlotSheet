@@ -1,3 +1,4 @@
+from itertools import combinations
 from pathlib import Path
 
 import pandas as pd
@@ -102,11 +103,8 @@ def add_wild_combination_counts(reelstop_df, symbols):
 
 def get_line_pattern_df(reel_df, paytable_df, symbols):
     base_symbols = get_base_symbols(symbols)
-
-    match_counts = sorted(
-        (col for col in paytable_df.columns),
-        reverse=True,
-    )
+    match_counts = sorted(paytable_df.columns, reverse=True)
+    reel_cols = list(reel_df.columns)
 
     rows = []
     for symbol in base_symbols:
@@ -116,7 +114,7 @@ def get_line_pattern_df(reel_df, paytable_df, symbols):
                 "MatchCount": count,
             }
 
-            for reel_id, reel_col in enumerate(list(reel_df.columns), start=1):
+            for reel_id, reel_col in enumerate(reel_cols, start=1):
                 if reel_id == 1:
                     row[reel_col] = symbol
                 elif reel_id <= count:
@@ -136,22 +134,123 @@ def get_line_pattern_df(reel_df, paytable_df, symbols):
     return line_df
 
 
+def get_line_with_wild_pattern_df(reel_df, paytable_df, symbols):
+    base_symbols = get_base_symbols(symbols)
+    match_counts = sorted(paytable_df.columns, reverse=True)
+    reel_cols = list(reel_df.columns)
+
+    rows = []
+    for symbol in base_symbols:
+        for count in match_counts:
+            row = {
+                "LineType": "LineK",
+                "Symbol": symbol,
+                "MatchCount": count,
+                "LeadingWCount": 0,
+            }
+
+            for reel_id, reel_col in enumerate(reel_cols, start=1):
+                if reel_id <= count:
+                    row[reel_col] = symbol
+                elif reel_id == count + 1:
+                    row[reel_col] = f"X_W{symbol}"
+                else:
+                    row[reel_col] = "-"
+
+            rows.append(row)
+
+    for symbol in base_symbols:
+        for count in match_counts:
+            for wild_count in range(1, count):
+                for wild_positions in combinations(range(count), wild_count):
+                    combination = [symbol] * count
+                    for position in wild_positions:
+                        combination[position] = "W"
+
+                    leading_w_count = 0
+                    for key in combination:
+                        if key != "W":
+                            break
+                        leading_w_count += 1
+
+                    row = {
+                        "LineType": "LineWK",
+                        "Symbol": symbol,
+                        "MatchCount": count,
+                        "LeadingWCount": leading_w_count,
+                    }
+
+                    for reel_id, reel_col in enumerate(reel_cols, start=1):
+                        if reel_id <= count:
+                            row[reel_col] = combination[reel_id - 1]
+                        elif reel_id == count + 1:
+                            row[reel_col] = f"X_W{symbol}"
+                        else:
+                            row[reel_col] = "-"
+
+                    rows.append(row)
+
+    for count in match_counts:
+        row = {
+            "LineType": "LineW",
+            "Symbol": "W",
+            "MatchCount": count,
+            "LeadingWCount": count,
+        }
+
+        for reel_id, reel_col in enumerate(reel_cols, start=1):
+            if reel_id <= count:
+                row[reel_col] = "W"
+            elif reel_id == count + 1:
+                row[reel_col] = "S"
+            else:
+                row[reel_col] = "-"
+
+        rows.append(row)
+
+    line_df = pd.DataFrame(rows)
+    line_df.attrs["表"] = "R1 可為 Wild 的連線組合"
+    line_df.attrs["列"] = "LineType x Symbol x MatchCount"
+
+    return line_df
+
+
 def add_line_rtp(line_df, reelstop_df, paytable_df):
+    def get_reel_probability(key, reel_col):
+        if key not in reelstop_df.index:
+            return 0
+
+        return (
+            reelstop_df.loc[key, reel_col]
+            / reelstop_df.loc["-", reel_col]
+        )
+
     prob_cols = []
     for reel_col in reelstop_df.columns:
         prob_col = f"{reel_col} Prob"
         prob_cols.append(prob_col)
 
         line_df[prob_col] = line_df[reel_col].apply(
-            lambda key: (
-                reelstop_df.loc[key, reel_col]
-                / reelstop_df.loc["-", reel_col]
-            )
+            lambda key: get_reel_probability(key, reel_col)
         )
-
     line_df["Prob"] = line_df[prob_cols].prod(axis=1)
-    line_df["Pay"] = line_df.apply(
-        lambda row: paytable_df.loc[row["Symbol"], row["MatchCount"]],
-        axis=1,
-    )
+
+    def get_pay(row):
+        symbol_pay = paytable_df.loc[
+            row["Symbol"],
+            row["MatchCount"],
+        ]
+
+        if row.get("LineType") != "LineWK":
+            return symbol_pay
+
+        leading_w_count = row["LeadingWCount"]
+        wild_pay = (
+            paytable_df.loc["W", leading_w_count]
+            if leading_w_count in paytable_df.columns
+            else 0
+        )
+        return max(symbol_pay, wild_pay)
+
+    line_df["Pay"] = line_df.apply(get_pay, axis=1)
     line_df["RTP"] = line_df["Prob"] * line_df["Pay"]
