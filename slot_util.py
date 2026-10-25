@@ -138,7 +138,49 @@ def add_wild_combination_counts(reelstop_df, symbols):
         )
 
 
-def add_scatter_window_counts(reelstop_df, window_height=3):
+def _count_windows_without_symbols(
+    reel,
+    target_symbols,
+    window_height,
+):
+    reel = reel.loc[reel != ""].tolist()
+
+    return sum(
+        all(
+            reel[(stop + offset) % len(reel)] not in target_symbols
+            for offset in range(window_height)
+        )
+        for stop in range(len(reel))
+    )
+
+
+def add_way_wild_combination_counts(
+    reelstop_df,
+    reel_df,
+    symbols,
+    window_height,
+):
+    base_symbols = get_base_symbols(symbols)
+
+    for symbol in base_symbols:
+        combination_symbol = f"W{symbol}"
+        reelstop_df.loc[combination_symbol] = (
+            reelstop_df.loc["W"] + reelstop_df.loc[symbol]
+        ) * window_height
+
+    for symbol in base_symbols:
+        combination_symbol = f"W{symbol}"
+        target_symbols = {"W", symbol}
+        reelstop_df.loc[f"X_{combination_symbol}"] = [
+            _count_windows_without_symbols(
+                reel_df[reel_col],
+                target_symbols,
+                window_height,
+            )
+            for reel_col in reelstop_df.columns
+        ]
+
+def add_scatter_window_counts(reelstop_df, window_height):
     scatter_key = f"{window_height}S"
     reelstop_df.loc[scatter_key] = (
         reelstop_df.loc["S"] * window_height
@@ -150,7 +192,7 @@ def add_scatter_window_counts(reelstop_df, window_height=3):
 def get_scatter_pattern_df(
     reel_df,
     free_spins_df,
-    window_height=3,
+    window_height,
 ):
     match_counts = sorted(free_spins_df.columns, reverse=True)
     reel_cols = list(reel_df.columns)
