@@ -11,6 +11,7 @@ def load_slot_tables(
     reel_sheet="Reel",
     paytable_sheet="PayTable",
     free_spins_sheet="FreeSpins",
+    game_sheet="Game",
 ):
     xlsx_path = Path(xlsx_path)
 
@@ -36,6 +37,15 @@ def load_slot_tables(
                 keep_default_na=False,
             )
 
+        game_settings = None
+        if game_sheet in workbook.sheet_names:
+            game_df = pd.read_excel(
+                workbook,
+                sheet_name=game_sheet,
+                keep_default_na=False,
+            )
+            game_settings = game_df.set_index("Setting")["Value"]
+
     reel_df.attrs["表"] = "滾輪表"
     reel_df.attrs["列"] = "Stop 索引"
     reel_df.attrs["行"] = "第幾個滾輪"
@@ -55,7 +65,12 @@ def load_slot_tables(
         free_spins_df.attrs["列"] = "Scatter Symbol"
         free_spins_df.attrs["行"] = "Scatter 數量"
 
-    return reel_df, paytable_df, free_spins_df
+    if game_settings is not None:
+        game_settings.attrs["表"] = "遊戲設定"
+        game_settings.attrs["列"] = "設定名稱"
+        game_settings.attrs["值"] = "設定值"
+
+    return reel_df, paytable_df, free_spins_df, game_settings
 
 def print_df_attrs(df):
     print("shape:", df.shape)
