@@ -354,6 +354,15 @@ def get_line_with_wild_pattern_df(reel_df, paytable_df, symbols):
 
     return line_df
 
+def get_way_pattern_df(reel_df, paytable_df, symbols):
+    way_df = get_line_pattern_df(
+        reel_df,
+        paytable_df,
+        symbols,
+    )
+    way_df.attrs["表"] = "Way 組合"
+
+    return way_df
 
 def add_line_rtp(line_df, reelstop_df, paytable_df):
     def get_reel_probability(key, reel_col):
@@ -395,6 +404,46 @@ def add_line_rtp(line_df, reelstop_df, paytable_df):
     line_df["Pay"] = line_df.apply(get_pay, axis=1)
     line_df["RTP"] = line_df["Prob"] * line_df["Pay"]
 
+
+def add_way_rtp(
+    way_df,
+    reelstop_df,
+    paytable_df,
+    window_height,
+    way_pay_bet,
+):
+    def get_reel_factor(key, reel_col):
+        if key not in reelstop_df.index:
+            return 0
+
+        count = reelstop_df.loc[key, reel_col]
+        if key in paytable_df.index:
+            count *= window_height
+
+        return count / reelstop_df.loc["-", reel_col]
+
+    factor_cols = []
+    for reel_col in reelstop_df.columns:
+        factor_col = f"{reel_col} Factor"
+        factor_cols.append(factor_col)
+
+        way_df[factor_col] = way_df[reel_col].apply(
+            lambda key: get_reel_factor(key, reel_col)
+        )
+    way_df["Ways"] = way_df[factor_cols].prod(axis=1)
+
+    way_df["Pay"] = way_df.apply(
+        lambda row: paytable_df.loc[
+            row["Symbol"],
+            row["MatchCount"],
+        ],
+        axis=1,
+    )
+    way_df["RTP"] = way_df["Ways"] * way_df["Pay"] / way_pay_bet
+
+    way_df.attrs["行.Ri Factor"] = "第 i 輪對 Ways 的乘數 (平均有效符號數 / 不接續機率 / 1: 由 pattern 的 K、WK、X_WK、- 決定)"
+    way_df.attrs["行.Ways"] = "一次 spin 的平均 ways 數"
+    way_df.attrs["行.RTP"] = "Ways × Pay / WayPayBet"
 
 def get_fg_trigger_analysis(
     base_pattern_df,
