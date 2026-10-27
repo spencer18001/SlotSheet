@@ -189,12 +189,22 @@ def add_scatter_window_counts(reelstop_df, window_height):
         reelstop_df.loc["-"] - reelstop_df.loc[scatter_key]
     )
 
+def _get_symbol_match_counts(table_df, symbol):
+    if table_df is None or symbol not in table_df.index:
+        return set()
+
+    return {
+        count
+        for count, value in table_df.loc[symbol].items()
+        if value != "" and pd.notna(value)
+    }
+
 def get_scatter_pattern_df(
     reel_df,
-    free_spins_df,
+    match_counts,
     window_height,
 ):
-    match_counts = sorted(free_spins_df.columns, reverse=True)
+    match_counts = sorted(match_counts, reverse=True)
     reel_cols = list(reel_df.columns)
     scatter_key = f"{window_height}S"
     exclude_key = f"X_{scatter_key}"
@@ -256,10 +266,14 @@ def get_line_pattern_df(
 
     line_df = pd.DataFrame(rows)
 
-    if free_spins_df is not None:
+    scatter_match_counts = (
+        _get_symbol_match_counts(paytable_df, "S")
+        | _get_symbol_match_counts(free_spins_df, "S")
+    )
+    if scatter_match_counts:
         scatter_df = get_scatter_pattern_df(
             reel_df,
-            free_spins_df,
+            scatter_match_counts,
             window_height,
         )
         line_df = pd.concat(
@@ -354,15 +368,37 @@ def get_line_with_wild_pattern_df(reel_df, paytable_df, symbols):
 
     return line_df
 
-def get_way_pattern_df(reel_df, paytable_df, symbols):
+def get_way_pattern_df(
+    reel_df,
+    paytable_df,
+    symbols,
+    free_spins_df=None,
+    window_height=3,
+):
     way_df = get_line_pattern_df(
         reel_df,
         paytable_df,
         symbols,
+        free_spins_df,
+        window_height,
     )
-    way_df.attrs["表"] = "Way 組合"
+    way_df.attrs["表"] = (
+        "Way 與 Scatter 組合"
+        if "S" in way_df["Symbol"].values
+        else "Way 組合"
+    )
 
     return way_df
+
+def _get_paytable_value(paytable_df, symbol, match_count):
+    if (
+        symbol not in paytable_df.index
+        or match_count not in paytable_df.columns
+    ):
+        return 0
+
+    value = paytable_df.loc[symbol, match_count]
+    return 0 if value == "" or pd.isna(value) else value
 
 def add_line_rtp(line_df, reelstop_df, paytable_df):
     def get_reel_probability(key, reel_col):
@@ -385,19 +421,20 @@ def add_line_rtp(line_df, reelstop_df, paytable_df):
     line_df["Prob"] = line_df[prob_cols].prod(axis=1)
 
     def get_pay(row):
-        symbol_pay = paytable_df.loc[
+        symbol_pay = _get_paytable_value(
+            paytable_df,
             row["Symbol"],
             row["MatchCount"],
-        ]
+        )
 
         if row.get("LineType") != "LineWK":
             return symbol_pay
 
         leading_w_count = row["LeadingWCount"]
-        wild_pay = (
-            paytable_df.loc["W", leading_w_count]
-            if leading_w_count in paytable_df.columns
-            else 0
+        wild_pay = _get_paytable_value(
+            paytable_df,
+            "W",
+            leading_w_count,
         )
         return max(symbol_pay, wild_pay)
 
@@ -433,16 +470,20 @@ def add_way_rtp(
     way_df["Ways"] = way_df[factor_cols].prod(axis=1)
 
     way_df["Pay"] = way_df.apply(
-        lambda row: paytable_df.loc[
+        lambda row: _get_paytable_value(
+            paytable_df,
             row["Symbol"],
             row["MatchCount"],
-        ],
+        ),
         axis=1,
     )
     way_df["RTP"] = way_df["Ways"] * way_df["Pay"] / way_pay_bet
 
     way_df.attrs["行.Ri Factor"] = "第 i 輪對 Ways 的乘數 (平均有效符號數 / 不接續機率 / 1: 由 pattern 的 K、WK、X_WK、- 決定)"
-    way_df.attrs["行.Ways"] = "一次 spin 的平均 ways 數"
+    way_df.attrs["行.Ways"] = (
+        "一般 Symbol：一次 spin 的平均 ways 數；"
+        "Scatter：該組合的出現機率"
+    )
     way_df.attrs["行.RTP"] = "Ways × Pay / WayPayBet"
 
 def get_fg_trigger_analysis(
