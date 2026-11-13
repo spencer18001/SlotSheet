@@ -400,6 +400,23 @@ def _get_paytable_value(paytable_df, symbol, match_count):
     value = paytable_df.loc[symbol, match_count]
     return 0 if value == "" or pd.isna(value) else value
 
+def _get_line_pay(row, paytable_df):
+    symbol_pay = _get_paytable_value(
+        paytable_df,
+        row["Symbol"],
+        row["MatchCount"],
+    )
+
+    if row.get("LineType") != "LineWK":
+        return symbol_pay
+
+    wild_pay = _get_paytable_value(
+        paytable_df,
+        "W",
+        row["LeadingWCount"],
+    )
+    return max(symbol_pay, wild_pay)
+
 def add_line_rtp(line_df, reelstop_df, paytable_df):
     def get_reel_probability(key, reel_col):
         if key not in reelstop_df.index:
@@ -420,26 +437,123 @@ def add_line_rtp(line_df, reelstop_df, paytable_df):
         )
     line_df["Prob"] = line_df[prob_cols].prod(axis=1)
 
-    def get_pay(row):
-        symbol_pay = _get_paytable_value(
-            paytable_df,
-            row["Symbol"],
-            row["MatchCount"],
-        )
-
-        if row.get("LineType") != "LineWK":
-            return symbol_pay
-
-        leading_w_count = row["LeadingWCount"]
-        wild_pay = _get_paytable_value(
-            paytable_df,
-            "W",
-            leading_w_count,
-        )
-        return max(symbol_pay, wild_pay)
-
-    line_df["Pay"] = line_df.apply(get_pay, axis=1)
+    line_df["Pay"] = line_df.apply(
+        lambda row: _get_line_pay(row, paytable_df),
+        axis=1,
+    )
     line_df["RTP"] = line_df["Prob"] * line_df["Pay"]
+
+
+def get_sticky_wild_state_df(reel_df):
+    reel_cols = list(reel_df.columns)
+    state_count = 2 ** len(reel_cols)
+
+    rows = []
+    for state_id in range(state_count):
+        state = f"{state_id:0{len(reel_cols)}b}"
+        row = {"State": state}
+        row.update({
+            reel_col: int(sticky)
+            for reel_col, sticky in zip(reel_cols, state)
+        })
+        rows.append(row)
+
+    sticky_state_df = pd.DataFrame(rows)
+    sticky_state_df.attrs["表"] = "Sticky Wild 狀態"
+    sticky_state_df.attrs["列"] = "Sticky Wild 狀態"
+    sticky_state_df.attrs["行.State"] = "0: 未黏住; 1: 已黏住"
+    sticky_state_df.attrs["行.Ri"] = "第 i 輪位置是否已有 Sticky Wild"
+
+    return sticky_state_df
+
+
+def get_sticky_wild_line_probability_df(
+    line_df,
+    sticky_state_df,
+    reelstop_df,
+    paytable_df,
+):
+    reel_cols = list(reelstop_df.columns)
+    sticky_line_df = line_df.copy()
+    sticky_line_df["Pay"] = sticky_line_df.apply(
+        lambda row: _get_line_pay(row, paytable_df),
+        axis=1,
+    )
+
+    for _, state_row in sticky_state_df.iterrows():
+        state = state_row["State"]
+        probability = pd.Series(1.0, index=sticky_line_df.index)
+
+        for reel_col in reel_cols:
+            keys = sticky_line_df[reel_col]
+
+            if state_row[reel_col] == 1:
+                reel_probability = keys.isin(["W", "-"]).astype(float)
+            else:
+                reel_probability = (
+                    keys.map(reelstop_df[reel_col])
+                    .fillna(0)
+                    / reelstop_df.loc["-", reel_col]
+                )
+
+            probability *= reel_probability
+
+        sticky_line_df[state] = probability
+
+    sticky_line_df.attrs["表"] = "各 Sticky Wild 狀態的連線組合機率"
+    sticky_line_df.attrs["列"] = "LineType x Symbol x MatchCount"
+    sticky_line_df.attrs["行.Pay"] = "該連線組合的得分"
+    sticky_line_df.attrs["行.State"] = (
+        "P(Line combination | Sticky Wild state)"
+    )
+
+    return sticky_line_df
+
+
+def get_sticky_wild_state_probability_df(
+    reelstop_df,
+    sticky_state_df,
+    free_spin_count,
+):
+    reel_cols = list(reelstop_df.columns)
+    free_spins = pd.RangeIndex(
+        start=1,
+        stop=free_spin_count + 1,
+        name="FreeSpin",
+    )
+    elapsed_spins = pd.Series(
+        free_spins - 1,
+        index=free_spins,
+    )
+    no_sticky_prob = {
+        reel_col: (
+            1 - reelstop_df.loc["W", reel_col] / reelstop_df.loc["-", reel_col]
+        )
+        for reel_col in reel_cols
+    }
+
+    state_probability_df = pd.DataFrame(index=free_spins)
+    for _, state_row in sticky_state_df.iterrows():
+        state = state_row["State"]
+        probability = pd.Series(1.0, index=free_spins)
+
+        for reel_col in reel_cols:
+            not_sticky = no_sticky_prob[reel_col] ** elapsed_spins
+            probability *= (
+                1 - not_sticky
+                if state_row[reel_col] == 1
+                else not_sticky
+            )
+
+        state_probability_df[state] = probability
+
+    state_probability_df.attrs["表"] = (
+        "各 Free Spin 開始時的 Sticky Wild 狀態機率"
+    )
+    state_probability_df.attrs["列"] = "第幾把 Free Spin"
+    state_probability_df.attrs["行.State"] = "P(Sticky Wild state)"
+
+    return state_probability_df
 
 
 def add_way_rtp(
