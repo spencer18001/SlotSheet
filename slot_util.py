@@ -72,6 +72,65 @@ def load_slot_tables(
 
     return reel_df, paytable_df, free_spins_df, game_settings
 
+def load_mega_symbol_tables(
+    xlsx_path,
+    reel_sheet="Reel",
+    paytable_sheet="PayTable",
+    payline_sheet="Payline",
+    mega_case_sheet="MegaCase",
+    mega_symbol_sheet="MegaSymbol",
+):
+    reel_df, paytable_df, _, _ = load_slot_tables(
+        xlsx_path,
+        reel_sheet=reel_sheet,
+        paytable_sheet=paytable_sheet,
+        free_spins_sheet=None,
+        game_sheet=None,
+    )
+
+    with pd.ExcelFile(xlsx_path) as workbook:
+        payline_df = pd.read_excel(
+            workbook,
+            sheet_name=payline_sheet,
+            keep_default_na=False,
+        )
+        mega_case_df = pd.read_excel(
+            workbook,
+            sheet_name=mega_case_sheet,
+            keep_default_na=False,
+        )
+        mega_symbol_df = pd.read_excel(
+            workbook,
+            sheet_name=mega_symbol_sheet,
+            keep_default_na=False,
+        )
+
+    payline_df.set_index("Line", inplace=True)
+    payline_df.attrs["表"] = "賠線表"
+    payline_df.attrs["列"] = "Line"
+    payline_df.attrs["行"] = "各滾輪上的 Row 索引"
+
+    mega_case_df.set_index("Case", inplace=True)
+    mega_case_df.attrs["表"] = "Mega Symbol 覆蓋 Case"
+    mega_case_df.attrs["列"] = "Case"
+    mega_case_df.attrs["行.Prob"] = "Case 出現機率"
+    mega_case_df.attrs["行.Top/Middle/Bottom"] = "各 Row 是否被覆蓋"
+
+    mega_symbol_df["Symbol"] = mega_symbol_df["Symbol"].astype(str)
+    mega_symbol_df.set_index("Symbol", inplace=True)
+    mega_symbol_df.attrs["表"] = "Mega Symbol 機率表"
+    mega_symbol_df.attrs["列"] = "Mega Symbol"
+    mega_symbol_df.attrs["行.Prob"] = "Mega Symbol 出現機率"
+
+    return (
+        reel_df,
+        paytable_df,
+        payline_df,
+        mega_case_df,
+        mega_symbol_df,
+    )
+
+
 def print_df_attrs(df):
     print("shape:", df.shape)
     for col, desc in df.attrs.items():
