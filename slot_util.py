@@ -615,6 +615,135 @@ def get_sticky_wild_state_probability_df(
     return state_probability_df
 
 
+def get_mega_symbol_state_df(mega_symbol_df):
+    rows = []
+    for mega_symbol in mega_symbol_df.index:
+        for pattern_id in range(2 ** 3):
+            pattern = f"{pattern_id:03b}"
+            rows.append({
+                "State": f"{mega_symbol}_{pattern}",
+                "MegaSymbol": mega_symbol,
+                "Pattern": pattern,
+                "R2": int(pattern[0]),
+                "R3": int(pattern[1]),
+                "R4": int(pattern[2]),
+            })
+
+    mega_state_df = pd.DataFrame(rows)
+    mega_state_df.attrs["表"] = "Mega Symbol State"
+    mega_state_df.attrs["列"] = "MegaSymbol x Pattern"
+    mega_state_df.attrs["行.State"] = "MegaSymbol_Pattern"
+    mega_state_df.attrs["行.Pattern"] = (
+        "R2、R3、R4 是否被 Mega Symbol 覆蓋"
+    )
+
+    return mega_state_df
+
+
+def _fixed_symbol_matches_key(key, fixed_symbol):
+    if key == "-":
+        return True
+
+    if key.startswith("X_W"):
+        return fixed_symbol not in ("W", key[3:])
+
+    if key.startswith("W") and key != "W":
+        return fixed_symbol in ("W", key[1:])
+
+    return key == fixed_symbol
+
+
+def get_mega_symbol_line_probability_df(
+    line_df,
+    mega_state_df,
+    reelstop_df,
+    paytable_df,
+):
+    reel_cols = list(reelstop_df.columns)
+    mega_line_df = line_df.copy()
+    mega_line_df["Pay"] = mega_line_df.apply(
+        lambda row: _get_line_pay(row, paytable_df),
+        axis=1,
+    )
+
+    state_probabilities = {}
+    for _, state_row in mega_state_df.iterrows():
+        state = state_row["State"]
+        mega_symbol = state_row["MegaSymbol"]
+        probability = pd.Series(1.0, index=mega_line_df.index)
+
+        for reel_col in reel_cols:
+            keys = mega_line_df[reel_col]
+
+            if reel_col in ("R2", "R3", "R4") and state_row[reel_col] == 1:
+                reel_probability = keys.apply(
+                    lambda key: float(
+                        _fixed_symbol_matches_key(key, mega_symbol)
+                    )
+                )
+            else:
+                reel_probability = (
+                    keys.map(reelstop_df[reel_col])
+                    .fillna(0)
+                    / reelstop_df.loc["-", reel_col]
+                )
+
+            probability *= reel_probability
+
+        state_probabilities[state] = probability
+
+    mega_line_df = pd.concat(
+        [mega_line_df, pd.DataFrame(state_probabilities)],
+        axis=1,
+    )
+
+    mega_line_df.attrs["表"] = (
+        "各 Mega Symbol State 的連線組合機率"
+    )
+    mega_line_df.attrs["列"] = "LineType x Symbol x MatchCount"
+    mega_line_df.attrs["行.Pay"] = "該連線組合的得分"
+    mega_line_df.attrs["行.State"] = (
+        "P(Line combination | Mega Symbol state)"
+    )
+
+    return mega_line_df
+
+
+def get_mega_pattern_probability_df(payline_df, mega_case_df):
+    row_names = {
+        0: "Top",
+        1: "Middle",
+        2: "Bottom",
+    }
+    covered_reels = ["R2", "R3", "R4"]
+    patterns = [f"{pattern_id:03b}" for pattern_id in range(2 ** 3)]
+    pattern_probability_df = pd.DataFrame(
+        0.0,
+        index=payline_df.index,
+        columns=patterns,
+    )
+
+    for line, payline_row in payline_df.iterrows():
+        for _, case_row in mega_case_df.iterrows():
+            pattern = "".join(
+                str(int(case_row[row_names[int(payline_row[reel_col])]]))
+                for reel_col in covered_reels
+            )
+            pattern_probability_df.loc[line, pattern] += case_row["Prob"]
+
+    pattern_probability_df.index.name = "Line"
+    pattern_probability_df.columns.name = "Pattern"
+    pattern_probability_df.attrs["表"] = (
+        "各 Payline 的 Mega Symbol Pattern 機率"
+    )
+    pattern_probability_df.attrs["列"] = "Line"
+    pattern_probability_df.attrs["行.Pattern"] = (
+        "P(該 Line 的 R2、R3、R4 覆蓋 Pattern)"
+    )
+
+    return pattern_probability_df
+
+
 def add_way_rtp(
     way_df,
     reelstop_df,
