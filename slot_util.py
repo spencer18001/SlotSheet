@@ -10,6 +10,7 @@ def load_slot_tables(
     xlsx_path,
     reel_sheet="Reel",
     paytable_sheet="PayTable",
+    payline_sheet="Payline",
     free_spins_sheet="FreeSpins",
     game_sheet="Game",
 ):
@@ -28,6 +29,14 @@ def load_slot_tables(
             sheet_name=paytable_sheet,
             keep_default_na=False,
         )
+
+        payline_df = None
+        if payline_sheet in workbook.sheet_names:
+            payline_df = pd.read_excel(
+                workbook,
+                sheet_name=payline_sheet,
+                keep_default_na=False,
+            )
 
         free_spins_df = None
         if free_spins_sheet in workbook.sheet_names:
@@ -57,6 +66,13 @@ def load_slot_tables(
     paytable_df.attrs["列"] = "連線的 Symbol"
     paytable_df.attrs["行"] = "由左到右的連線數"
 
+    if payline_df is not None:
+        payline_df.set_index("Line", inplace=True)
+
+        payline_df.attrs["表"] = "賠線表"
+        payline_df.attrs["列"] = "Line"
+        payline_df.attrs["行"] = "各滾輪上的 Row 索引"
+
     if free_spins_df is not None:
         free_spins_df["Symbol"] = free_spins_df["Symbol"].astype(str)
         free_spins_df.set_index("Symbol", inplace=True)
@@ -70,7 +86,14 @@ def load_slot_tables(
         game_settings.attrs["列"] = "設定名稱"
         game_settings.attrs["值"] = "設定值"
 
-    return reel_df, paytable_df, free_spins_df, game_settings
+    return (
+        reel_df,
+        paytable_df,
+        payline_df,
+        free_spins_df,
+        game_settings,
+    )
+
 
 def load_mega_symbol_tables(
     xlsx_path,
@@ -80,20 +103,16 @@ def load_mega_symbol_tables(
     mega_case_sheet="MegaCase",
     mega_symbol_sheet="MegaSymbol",
 ):
-    reel_df, paytable_df, _, _ = load_slot_tables(
+    reel_df, paytable_df, payline_df, _, _ = load_slot_tables(
         xlsx_path,
         reel_sheet=reel_sheet,
         paytable_sheet=paytable_sheet,
+        payline_sheet=payline_sheet,
         free_spins_sheet=None,
         game_sheet=None,
     )
 
     with pd.ExcelFile(xlsx_path) as workbook:
-        payline_df = pd.read_excel(
-            workbook,
-            sheet_name=payline_sheet,
-            keep_default_na=False,
-        )
         mega_case_df = pd.read_excel(
             workbook,
             sheet_name=mega_case_sheet,
@@ -104,11 +123,6 @@ def load_mega_symbol_tables(
             sheet_name=mega_symbol_sheet,
             keep_default_na=False,
         )
-
-    payline_df.set_index("Line", inplace=True)
-    payline_df.attrs["表"] = "賠線表"
-    payline_df.attrs["列"] = "Line"
-    payline_df.attrs["行"] = "各滾輪上的 Row 索引"
 
     mega_case_df.set_index("Case", inplace=True)
     mega_case_df.attrs["表"] = "Mega Symbol 覆蓋 Case"
@@ -195,6 +209,125 @@ def add_wild_combination_counts(reelstop_df, symbols):
             reelstop_df.loc["-"]
             - reelstop_df.loc[combination_symbol]
         )
+
+
+def get_expanding_wild_window_df(
+    reel_df,
+    payline_df,
+    window_height,
+    wild_symbol="W",
+):
+    rows = []
+
+    for line, payline_row in payline_df.iterrows():
+        for reel_col in reel_df.columns:
+            reel = reel_df.loc[
+                reel_df[reel_col] != "",
+                reel_col,
+            ].tolist()
+            line_position = int(payline_row[reel_col])
+
+            for stop in range(len(reel)):
+                window = [
+                    reel[(stop + offset) % len(reel)]
+                    for offset in range(window_height)
+                ]
+                has_wild = wild_symbol in window
+                raw_symbol = window[line_position]
+
+                rows.append({
+                    "Line": line,
+                    "Reel": reel_col,
+                    "Stop": stop,
+                    "LinePosition": line_position,
+                    "RawSymbol": raw_symbol,
+                    "HasWild": has_wild,
+                    "EffectiveSymbol": (
+                        wild_symbol if has_wild else raw_symbol
+                    ),
+                })
+
+    window_df = pd.DataFrame(rows)
+
+    window_df.attrs["表"] = "Expanding Wild 視窗結果"
+    window_df.attrs["列"] = "Line x Reel x Stop"
+    window_df.attrs["行.LinePosition"] = "Payline 在該 Reel 的 Row 索引"
+    window_df.attrs["行.RawSymbol"] = "擴展前 Payline 位置的 Symbol"
+    window_df.attrs["行.HasWild"] = "可見視窗內是否包含 Wild"
+    window_df.attrs["行.EffectiveSymbol"] = "Expanding Wild 套用後的 Symbol"
+
+    return window_df
+
+
+def get_expanding_wild_reelstop_df(window_df, symbols):
+    reel_cols = window_df["Reel"].drop_duplicates().tolist()
+    line_reelstop_dfs = []
+
+    for line, line_window_df in window_df.groupby("Line", sort=False):
+        line_reelstop_df = (
+            line_window_df
+            .groupby(["EffectiveSymbol", "Reel"])
+            .size()
+            .unstack(fill_value=0)
+            .reindex(index=symbols, columns=reel_cols, fill_value=0)
+            .astype(int)
+        )
+        line_reelstop_df.index.name = "Symbol"
+        line_reelstop_df.loc["-"] = (
+            line_window_df
+            .groupby("Reel")["Stop"]
+            .nunique()
+            .reindex(reel_cols)
+            .astype(int)
+        )
+        add_wild_combination_counts(line_reelstop_df, symbols)
+        line_reelstop_dfs.append((line, line_reelstop_df))
+
+    reelstop_df = pd.concat(
+        [df for _, df in line_reelstop_dfs],
+        keys=[line for line, _ in line_reelstop_dfs],
+        names=["Line", "Symbol"],
+    )
+    
+    reelstop_df.attrs["表"] = "各 Payline 的 Expanding Wild 有效 Stop 數"
+    reelstop_df.attrs["列"] = "Line x Symbol"
+    reelstop_df.attrs["行"] = "第幾個滾輪"
+
+    return reelstop_df
+
+
+def get_expanding_wild_line_rtp_df(
+    line_pattern_df,
+    expanding_reelstop_df,
+    paytable_df,
+):
+    lines = (
+        expanding_reelstop_df
+        .index
+        .get_level_values("Line")
+        .unique()
+    )
+    line_rtp_dfs = []
+
+    for line in lines:
+        line_df = line_pattern_df.copy()
+        add_line_rtp(
+            line_df,
+            expanding_reelstop_df.loc[line],
+            paytable_df,
+        )
+        line_df.insert(0, "Line", line)
+        line_rtp_dfs.append(line_df)
+
+    expanding_line_df = pd.concat(
+        line_rtp_dfs,
+        ignore_index=True,
+    )
+    
+    expanding_line_df.attrs["表"] = "各 Payline 的 Expanding Wild RTP"
+    expanding_line_df.attrs["列"] = "Line x Symbol x MatchCount"
+
+    return expanding_line_df
 
 
 def _count_windows_without_symbols(
