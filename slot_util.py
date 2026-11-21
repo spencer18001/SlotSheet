@@ -145,6 +145,38 @@ def load_mega_symbol_tables(
     )
 
 
+def load_super_stack_tables(
+    xlsx_path,
+    reel_sheet="Reel",
+    paytable_sheet="PayTable",
+    super_stack_sheet="SS",
+):
+    reel_df, paytable_df, _, _, _ = load_slot_tables(
+        xlsx_path,
+        reel_sheet=reel_sheet,
+        paytable_sheet=paytable_sheet,
+        payline_sheet=None,
+        free_spins_sheet=None,
+        game_sheet=None,
+    )
+
+    super_stack_weight_df = pd.read_excel(
+        xlsx_path,
+        sheet_name=super_stack_sheet,
+        keep_default_na=False,
+    )
+    super_stack_weight_df["Symbol"] = (
+        super_stack_weight_df["Symbol"].astype(str)
+    )
+    super_stack_weight_df.set_index("Symbol", inplace=True)
+
+    super_stack_weight_df.attrs["表"] = "Super Stack 轉換權重表"
+    super_stack_weight_df.attrs["列"] = "SS 轉換後的 Symbol"
+    super_stack_weight_df.attrs["行"] = "第幾個滾輪"
+
+    return reel_df, paytable_df, super_stack_weight_df
+
+
 def print_df_attrs(df):
     print("shape:", df.shape)
     for col, desc in df.attrs.items():
@@ -190,7 +222,7 @@ def get_base_symbols(symbols):
     return [
         symbol
         for symbol in symbols
-        if symbol not in ("W", "S")
+        if symbol not in ("W", "S", "SS")
     ]
 
 
@@ -209,6 +241,65 @@ def add_wild_combination_counts(reelstop_df, symbols):
             reelstop_df.loc["-"]
             - reelstop_df.loc[combination_symbol]
         )
+
+
+def get_super_stack_reelstop_df(
+    reel_df,
+    super_stack_weight_df,
+    symbols,
+):
+    reelstop_df = get_reelstop_df(reel_df, symbols)
+    reel_cols = list(reelstop_df.columns)
+    weight_df = (
+        super_stack_weight_df
+        .reindex(columns=reel_cols)
+        .apply(pd.to_numeric)
+    )
+    probability_df = weight_df.div(
+        weight_df.sum(axis=0),
+        axis="columns",
+    )
+
+    converted_symbols = [
+        symbol
+        for symbol in symbols
+        if symbol != "SS"
+    ]
+    converted_symbols = [
+        symbol
+        for symbol in symbols
+        if symbol != "SS"
+    ]
+    if "W" not in converted_symbols:
+        converted_symbols.insert(0, "W")
+
+    super_stack_reelstop_df = pd.DataFrame(
+        0.0,
+        index=converted_symbols,
+        columns=reel_cols,
+    )
+    for symbol in converted_symbols:
+        if symbol in reelstop_df.index:
+            super_stack_reelstop_df.loc[symbol] += (
+                reelstop_df.loc[symbol]
+            )
+
+        if symbol in probability_df.index:
+            super_stack_reelstop_df.loc[symbol] += (
+                reelstop_df.loc["SS"]
+                * probability_df.loc[symbol]
+            )
+
+    super_stack_reelstop_df.loc["-"] = reelstop_df.loc["-"]
+    super_stack_reelstop_df.index.name = "Symbol"
+
+    super_stack_reelstop_df.attrs["表"] = (
+        "Super Stack 轉換後的平均 Stop 數"
+    )
+    super_stack_reelstop_df.attrs["列"] = "Symbol"
+    super_stack_reelstop_df.attrs["行"] = "第幾個滾輪"
+
+    return super_stack_reelstop_df
 
 
 def get_expanding_wild_window_df(
